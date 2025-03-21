@@ -177,7 +177,7 @@ tool/frames_extraction
 tool/labelling_tool_output
 assets
 old_assets
-
+multi_label_data
 school_labs
 
 evaluations/mediapipe_face_detection_temp
