@@ -180,5 +180,9 @@ old_assets
 multi_label_data
 school_labs
 
-evaluations/mediapipe_face_detection_temp
-evaluations/haar_cascade_face_detection_temp
+evaluations/**/*.jpg
+
+# Ignore all *.pt of Yolo
+**/*.pt
+
+**/*.mp4
