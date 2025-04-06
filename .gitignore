@@ -175,7 +175,7 @@ cython_debug/
 
 tool/frames_extraction
 tool/labelling_tool_output
-assets
+assets/*.mp4
 old_assets
 multi_label_data
 school_labs
