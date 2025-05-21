@@ -16,6 +16,7 @@ class DriverBehaviorClassifier:
         if os.path.exists(model_path):
             logger.info(f"Loading full model from: {model_path}")
             self.model = load_model(model_path)
+            logger.info("Model loaded successfully.")
         else:
             # Fallback to loading weights
             weights_path = './models/cnn_based/model_finetune_checkpoint.weights.h5'
@@ -39,14 +40,17 @@ class DriverBehaviorClassifier:
                       metrics=['accuracy'])
         return model
     
-    def predict(self, image_path):
+    def predict_from_path(self, image_path):
         image = cv2.imread(image_path)
         if image is None:
             raise ValueError(f"[ERROR] Could not load image: {image_path}")
-
+        return self.predict_from_image(image)
+    
+    def predict_from_image(self, image):
+        # image: numpy array (BGR hoặc RGB) chưa resize, chưa chuẩn hóa
         image = cv2.resize(image, (224, 224))
         image = image.astype(np.float32) / 255.0
-        image = np.expand_dims(image, axis=0)
+        image = np.expand_dims(image, axis=0)  # shape (1, 224, 224, 3)
 
         predictions = self.model.predict(image)[0]
         predicted_labels = []
