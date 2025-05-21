@@ -1,5 +1,3 @@
-import subprocess
-import sys
 import tkinter as tk
 import customtkinter as ctk
 import cv2
@@ -76,14 +74,14 @@ class DriverMonitorApp:
 
         self.using_phone = False
 
-        # Khởi tạo subprocess worker mediapipe
-        self.worker_proc = subprocess.Popen(
-            [sys.executable, "mediapipe_worker.py"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-        )
+        # Khởi tạo về tình trạng buồn ngủ
+        self.start_sleepy_eye_time = None
+        self.maximum_sleepy_eye_duration = 10  # giây
+        self.warned_3s = False
+        self.warned_5s = False
+        self.warned_10s = False
+        self.is_playing_stop_warning = False # Thông báo dừng xe có đang phát hay không
+
 
     def init_ui(self):
         self.init_video_frame()
@@ -239,41 +237,125 @@ class DriverMonitorApp:
                     self.last_warning_time = now
             else:
                 self.using_phone = False
-                self.set_status("🟢 Bình thường", "green")
                 self.last_warning_time = 0
 
     def run_predict_thread(self):
         self.yolo_detect_phone(self.frame_for_predict)
         self.predict_thread = None
 
+    def reset_warnings(self):
+        self.start_sleepy_eye_time = None
+        self.warned_3s = False
+        self.warned_5s = False
+        self.warned_10s = False
+    
+    def check_eye_closed(self):
+        if self.start_sleepy_eye_time is None:
+            self.start_sleepy_eye_time = time.time()
+
+        duration = time.time() - self.start_sleepy_eye_time
+        audio_path = "./assets/audios/warn_level2.wav" if not self.warned_3s else "./assets/audios/warn_level3.wav"
+        is_stop_warning = False  # flag xem có đang cảnh báo stop_car_warning
+
+        if duration >= 6 and not self.warned_5s:
+            audio_path = "./assets/audios/stop_car_warning.wav"
+            self.warned_5s = True
+            is_stop_warning = True
+        elif (duration >= 3 and not self.warned_3s) or (self.warned_3s and duration >= 7):
+            audio_path = "./assets/audios/warn_level3.wav"
+            self.warned_3s = True
+
+        return audio_path, is_stop_warning
+
+
     def update_error_counts(self, labels):
-        if 'sleepy_eye' in labels:
+        if "sleepy_eye" in labels:
             self.sleepy_eye_count += 1
             self.eye_label.config(text=f"👁️ Mắt buồn ngủ: {self.sleepy_eye_count}")
-        if 'yawn' in labels:
+        if "yawn" in labels:
             self.sleepy_yawn_count += 1
             self.yawn_label.config(text=f"😪 Ngáp: {self.sleepy_yawn_count}")
-        if 'look_away' in labels:
+        if "look_away" in labels:
             self.lookaway_count += 1
             self.look_label.config(text=f"👀 Nhìn hướng khác: {self.lookaway_count}")
 
     def post_process_predictions(self, labels):
-        labels = [label for label in labels if label != 'natural']
-            
+        # Loại bỏ nhãn 'natural'
+        labels = [label for label in labels if label != "natural"]
         num_errors = len(labels)
+
         if num_errors == 0:
-            self.set_status("🟢 Bình thường", "green")
-        elif num_errors == 1:
-            if 'look_away' in labels or 'rub_eye' in labels:
-                play_audio("./assets/audios/warn_level1.wav")
-            else:
-                play_audio("./assets/audios/warn_level2.wav")
-            self.set_status("🟠 Mất tập trung", "orange")
-            self.update_error_counts(labels)
+            self.reset_warnings()
+            self.set_status("🟢 Tình trạng bình thường", "green")
+            return
+
+        # Mức cảnh báo mặc định
+        status_text = "🟠 Cảnh báo nhẹ"
+        status_color = "orange"
+        audio_path = "./assets/audios/warn_level1.wav"
+
+        # Phân tích theo nhãn
+        if num_errors == 1:
+            if "look_away" in labels:
+                status_text = "🟠 Mất tập trung"
+                status_color = "orange"
+                audio_path = "./assets/audios/look_straight.wav"
+                play_audio(audio_path)
+            elif "rub_eye" in labels:
+                status_text = "🟠 Dụi mắt - dấu hiệu mệt mỏi"
+                status_color = "orange"
+                audio_path = "./assets/audios/warn_level1.wav"
+                play_audio(audio_path)
+            elif "yawn" in labels:
+                status_text = "🟠 Dấu hiệu buồn ngủ nhẹ"
+                status_color = "red"
+                audio_path = "./assets/audios/warn_level2.wav"
+                play_audio(audio_path)
+
+            if "sleepy_eye" in labels:
+                if self.start_sleepy_eye_time is None:
+                    self.start_sleepy_eye_time = time.time()
+                
+                # Kiểm tra thời gian buồn ngủ
+                logger.debug(f"Time since sleepy eye started: {time.time() - self.start_sleepy_eye_time}")
+                audio_path, is_stop_warning = self.check_eye_closed()
+
+                if is_stop_warning:
+                    # Nếu đang phát cảnh báo dừng xe rồi
+                    if not self.is_playing_stop_warning:
+                        # Nếu chưa phát thì phát và set trạng thái đang phát
+                        self.is_playing_stop_warning = True
+
+                        def play_and_reset():
+                            pygame.mixer.music.load(audio_path)
+                            pygame.mixer.music.play()
+                            while pygame.mixer.music.get_busy():
+                                time.sleep(0.1)
+                            self.is_playing_stop_warning = False
+
+                        threading.Thread(target=play_and_reset, daemon=True).start()
+                else:
+                    # Nếu không phải cảnh báo dừng xe, mà cảnh báo stop_warning đang phát thì đợi nó xong
+                    def play_warn3_when_ready():
+                        while self.is_playing_stop_warning:
+                            time.sleep(0.5)
+                        play_audio(audio_path)
+
+                    threading.Thread(target=play_warn3_when_ready, daemon=True).start()
         else:
-            self.set_status("🔴 Buồn ngủ", "red")
-            play_audio("./assets/audios/warn_level3.wav")
-            self.update_error_counts(labels)
+            if "look_away" in labels:
+                status_text = "🟣 Mất tập trung kèm dấu hiệu buồn ngủ"
+                status_color = "purple"
+            else:
+                status_text = "🔴 Buồn ngủ nghiêm trọng"
+                status_color = "red"
+            audio_path = "./assets/audios/warn_level3.wav"
+            play_audio(audio_path)
+
+        # Cập nhật giao diện và âm thanh cảnh báo
+        self.set_status(status_text, status_color)
+        self.update_error_counts(labels)
+
 
     def update_frame(self):
         if self.monitoring:
@@ -303,7 +385,9 @@ class DriverMonitorApp:
 
                 detect_interval = 1.0  # giây
 
-                if not self.using_phone and (not hasattr(self, 'last_detect_time') or (current_time - self.last_detect_time) > detect_interval):
+                if not self.using_phone and (
+                    not hasattr(self, "last_detect_time") or (current_time - self.last_detect_time) > detect_interval
+                ):
                     face_img = self.detect_and_crop_face(frame)
                     if face_img is not None:
                         labels, _ = self.classifier.predict_from_image(face_img)
