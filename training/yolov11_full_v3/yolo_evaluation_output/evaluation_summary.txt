@@ -1,0 +1,32 @@
+--- KẾT QUẢ ĐÁNH GIÁ YOLO MODEL ---
+Model Path: d:\Documents\Ki_8\XLA\yolov11_full_v3/runs/detect/train/weights/best.pt
+CSV Path: output_yolo.csv
+Confidence Threshold: 0.25
+Số lượng ảnh đã xử lý: 156
+Thời gian dự đoán trung bình mỗi ảnh: 0.0467 giây
+Tổng thời gian dự đoán: 7.2826 giây
+Accuracy: 0.9487
+F1 Score (Macro): 0.9585
+F1 Score (Weighted): 0.9503
+
+Confusion Matrix:
+            look_away  natural  rub_eye  sleepy_eye  yawn
+look_away          30        0        0           0     0
+natural             0       30        0           0     0
+rub_eye             0        0        5           0     0
+sleepy_eye          0        6        0          43     0
+yawn                0        2        0           0    40
+
+Classification Report:
+              precision    recall  f1-score   support
+
+   look_away       1.00      1.00      1.00        30
+     natural       0.79      1.00      0.88        30
+     rub_eye       1.00      1.00      1.00         5
+  sleepy_eye       1.00      0.88      0.93        49
+        yawn       1.00      0.95      0.98        42
+
+    accuracy                           0.95       156
+   macro avg       0.96      0.97      0.96       156
+weighted avg       0.96      0.95      0.95       156
+
