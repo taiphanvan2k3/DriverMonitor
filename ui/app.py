@@ -10,7 +10,7 @@ import mediapipe as mp
 from loguru import logger
 from shared.utils import extend_bounding_box_area
 from shared.driver_behavior_model import DriverBehaviorClassifier
-
+from telegram.telegram_helper import send_driver_drowsiness_alert_from_frame
 
 pygame.mixer.init()
 
@@ -55,7 +55,7 @@ class DriverMonitorApp:
         self.is_gif_playing = True
 
         self.is_playing_warning = False
-        self.last_warning_time = 0
+        self.last_phone_warning_time = 0
         self.warning_interval = 3
 
         self.last_boxes = []
@@ -63,7 +63,8 @@ class DriverMonitorApp:
         self.frame_skip = 3
         self.start_time = time.time()
 
-        self.predict_thread = None
+        self.yolo_predict_thread = None
+        self.classifier_predict_thread = None
         self.frame_for_predict = None
         self.predict_lock = threading.Lock()
 
@@ -71,8 +72,18 @@ class DriverMonitorApp:
         self.sleepy_yawn_count = 0
         self.lookaway_count = 0
         self.phone_count = 0
+        self.previous_status = "normal"
 
         self.using_phone = False
+
+        # Trạng thái không nhìn thẳng
+        self.start_look_away_time = None
+        self.play_look_away_sound_step = 1.5  # giây
+
+        # Khởi tạo thời gian gửi ảnh qua Telegram
+        self.last_send_time = None
+        self.send_interval = 10  # giây
+        self.telegram_frame = None  # ảnh sẽ gửi qua Telegram
 
         # Khởi tạo về tình trạng buồn ngủ
         self.start_sleepy_eye_time = None
@@ -80,8 +91,7 @@ class DriverMonitorApp:
         self.warned_3s = False
         self.warned_5s = False
         self.warned_10s = False
-        self.is_playing_stop_warning = False # Thông báo dừng xe có đang phát hay không
-
+        self.is_playing_stop_warning = False  # Thông báo dừng xe có đang phát hay không
 
     def init_ui(self):
         self.init_video_frame()
@@ -217,9 +227,11 @@ class DriverMonitorApp:
                 return face_crop
         return None
 
-    def yolo_detect_phone(self, frame):
+    def run_predict_phone(self):
+        self.yolo_predict_thread = None
+
         with self.predict_lock:
-            results = self.yolo_model.predict(frame, conf=0.6, classes=[67], verbose=False)
+            results = self.yolo_model.predict(self.frame_for_predict, conf=0.6, classes=[67], verbose=False)
             self.last_boxes = []
             for box in results[0].boxes:
                 x1, y1, x2, y2 = box.xyxy[0]
@@ -231,55 +243,95 @@ class DriverMonitorApp:
                 self.set_status("📱 Dùng điện thoại", "orange")
                 self.phone_label.config(text=f"📱 Dùng điện thoại: {self.phone_count}")
                 now = time.time()
-                if now - self.last_warning_time > self.warning_interval:
-                    self.phone_count += 1
+                logger.debug(f"Last phone warning time: {now - self.last_phone_warning_time}")
+                if now - self.last_phone_warning_time > self.warning_interval:
+                    self.phone_count += 1 if self.previous_status != "using_phone" else 0
+                    self.previous_status = "using_phone"
                     play_audio("./assets/audios/not_use_phone.wav")
-                    self.last_warning_time = now
+                    self.last_phone_warning_time = now
             else:
                 self.using_phone = False
-                self.last_warning_time = 0
-
-    def run_predict_thread(self):
-        self.yolo_detect_phone(self.frame_for_predict)
-        self.predict_thread = None
 
     def reset_warnings(self):
         self.start_sleepy_eye_time = None
         self.warned_3s = False
         self.warned_5s = False
         self.warned_10s = False
-    
-    def check_eye_closed(self):
+
+    def play_sleepy_eye_by_level(self):
+        """
+        Xác định âm thanh cảnh báo dựa trên khoảng thời gian mà mắt buồn ngủ đã được phát hiện.
+        """
         if self.start_sleepy_eye_time is None:
             self.start_sleepy_eye_time = time.time()
 
         duration = time.time() - self.start_sleepy_eye_time
         audio_path = "./assets/audios/warn_level2.wav" if not self.warned_3s else "./assets/audios/warn_level3.wav"
-        is_stop_warning = False  # flag xem có đang cảnh báo stop_car_warning
+        is_warning_stop_car = False  # flag xem có đang cảnh báo stop_car_warning
+
+        # Cứ từng chu kỳ 6s sẽ gửi đến telegram
+        now = time.time()
+        if duration >= 6 and (self.last_send_time is None or now - self.last_send_time >= 6):
+            self.last_send_time = now
+            self.telegram_frame = self.frame_for_predict.copy()
+            self.run_send_telegram_alert(duration)
 
         if duration >= 6 and not self.warned_5s:
             audio_path = "./assets/audios/stop_car_warning.wav"
             self.warned_5s = True
-            is_stop_warning = True
+            is_warning_stop_car = True
         elif (duration >= 3 and not self.warned_3s) or (self.warned_3s and duration >= 7):
             audio_path = "./assets/audios/warn_level3.wav"
             self.warned_3s = True
 
-        return audio_path, is_stop_warning
-
+        return audio_path, is_warning_stop_car
 
     def update_error_counts(self, labels):
         if "sleepy_eye" in labels:
-            self.sleepy_eye_count += 1
+            self.sleepy_eye_count += self.previous_status != "sleepy_eye"
+            self.previous_status = "sleepy_eye"
             self.eye_label.config(text=f"👁️ Mắt buồn ngủ: {self.sleepy_eye_count}")
         if "yawn" in labels:
-            self.sleepy_yawn_count += 1
+            self.sleepy_yawn_count += self.previous_status != "yawn"
+            self.previous_status = "yawn"
             self.yawn_label.config(text=f"😪 Ngáp: {self.sleepy_yawn_count}")
         if "look_away" in labels:
-            self.lookaway_count += 1
+            self.lookaway_count += self.previous_status != "look_away"
+            self.previous_status = "look_away"
             self.look_label.config(text=f"👀 Nhìn hướng khác: {self.lookaway_count}")
 
+    def run_predict_classifier(self):
+        """
+        Chạy mô hình phân loại hành vi lái xe trên ảnh đã cắt từ khuôn mặt.
+        """
+        try:
+            face_img = self.detect_and_crop_face(self.frame_for_predict)
+            if face_img is not None:
+                labels, _ = self.classifier.predict_from_image(face_img)
+                self.post_process_predictions(labels)
+                logger.info(f"Detected labels: {labels}")
+        except Exception as e:
+            logger.error(f"Prediction thread failed: {e}")
+        finally:
+            self.classifier_predict_thread = None  # cho phép thread mới chạy tiếp lần sau
+
+    def run_send_telegram_alert(self, lasted_duration):
+        """
+        Gửi cảnh báo qua Telegram nếu tài xế nhắm mắt quá lâu.
+        """
+        if self.telegram_frame is not None:
+            # Tạo thread gửi cảnh báo
+            threading.Thread(
+                target=send_driver_drowsiness_alert_from_frame,
+                args=(self.telegram_frame, lasted_duration),
+                daemon=True,
+            ).start()
+
     def post_process_predictions(self, labels):
+        """
+        Xử lý kết quả dự đoán từ mô hình phân loại hành vi lái xe.
+        Bao gồm cập nhật trạng thái, âm thanh cảnh báo và thống kê.
+        """
         # Loại bỏ nhãn 'natural'
         labels = [label for label in labels if label != "natural"]
         num_errors = len(labels)
@@ -287,6 +339,7 @@ class DriverMonitorApp:
         if num_errors == 0:
             self.reset_warnings()
             self.set_status("🟢 Tình trạng bình thường", "green")
+            self.previous_status = "normal"
             return
 
         # Mức cảnh báo mặc định
@@ -300,7 +353,15 @@ class DriverMonitorApp:
                 status_text = "🟠 Mất tập trung"
                 status_color = "orange"
                 audio_path = "./assets/audios/look_straight.wav"
-                play_audio(audio_path)
+
+                # Kiểm tra xem có nên phát audio yêu cầu nhìn thẳng không?
+                if (
+                    self.start_look_away_time is None
+                    or time.time() - self.start_look_away_time > self.play_look_away_sound_step
+                ):
+                    self.start_look_away_time = time.time()
+                    play_audio(audio_path)
+
             elif "rub_eye" in labels:
                 status_text = "🟠 Dụi mắt - dấu hiệu mệt mỏi"
                 status_color = "orange"
@@ -315,12 +376,11 @@ class DriverMonitorApp:
             if "sleepy_eye" in labels:
                 if self.start_sleepy_eye_time is None:
                     self.start_sleepy_eye_time = time.time()
-                
-                # Kiểm tra thời gian buồn ngủ
-                logger.debug(f"Time since sleepy eye started: {time.time() - self.start_sleepy_eye_time}")
-                audio_path, is_stop_warning = self.check_eye_closed()
 
-                if is_stop_warning:
+                # Kiểm tra thời gian buồn ngủ
+                audio_path, is_warning_stop_car = self.play_sleepy_eye_by_level()
+
+                if is_warning_stop_car:
                     # Nếu đang phát cảnh báo dừng xe rồi
                     if not self.is_playing_stop_warning:
                         # Nếu chưa phát thì phát và set trạng thái đang phát
@@ -356,7 +416,6 @@ class DriverMonitorApp:
         self.set_status(status_text, status_color)
         self.update_error_counts(labels)
 
-
     def update_frame(self):
         if self.monitoring:
             ret, frame = self.cap.read()
@@ -366,10 +425,10 @@ class DriverMonitorApp:
 
                 if current_time - self.start_time >= 3:
                     self.frame_count += 1
-                    if self.frame_count % self.frame_skip == 0 and self.predict_thread is None:
+                    if self.frame_count % self.frame_skip == 0 and self.yolo_predict_thread is None:
                         self.frame_for_predict = frame.copy()
-                        self.predict_thread = threading.Thread(target=self.run_predict_thread)
-                        self.predict_thread.start()
+                        self.yolo_predict_thread = threading.Thread(target=self.run_predict_phone)
+                        self.yolo_predict_thread.start()
 
                 for x1, y1, x2, y2, conf in self.last_boxes:
                     cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
@@ -390,12 +449,19 @@ class DriverMonitorApp:
                 ):
                     face_img = self.detect_and_crop_face(frame)
                     if face_img is not None:
-                        labels, confidences = self.classifier.predict_from_image(face_img)
-                        self.post_process_predictions(labels)
-                        logger.info(f"Detected labels: {labels}, {confidences}")
+                        if self.classifier_predict_thread is None:
+                            self.frame_for_predict = face_img.copy()
+                            self.classifier_predict_thread = threading.Thread(target=self.run_predict_classifier)
+                            self.classifier_predict_thread.start()
                     else:
                         logger.info("No face detected")
-                        play_audio("./assets/audios/look_straight.wav")
+
+                        if (
+                            self.start_look_away_time is None
+                            or (current_time - self.start_look_away_time) > self.play_look_away_sound_step
+                        ):
+                            self.start_look_away_time = current_time
+                            play_audio("./assets/audios/look_straight.wav")
 
                     self.last_detect_time = current_time  # cập nhật lại thời điểm detect cuối cùng
 
@@ -408,6 +474,12 @@ class DriverMonitorApp:
 
     def __del__(self):
         self.cap.release()
+        if self.yolo_predict_thread and self.yolo_predict_thread.is_alive():
+            self.yolo_predict_thread.join(timeout=1)
+
+        if self.classifier_predict_thread and self.classifier_predict_thread.is_alive():
+            self.classifier_predict_thread.join(timeout=1)
+        pygame.mixer.quit()
 
 
 if __name__ == "__main__":
