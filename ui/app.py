@@ -390,9 +390,9 @@ class DriverMonitorApp:
                 ):
                     face_img = self.detect_and_crop_face(frame)
                     if face_img is not None:
-                        labels, _ = self.classifier.predict_from_image(face_img)
+                        labels, confidences = self.classifier.predict_from_image(face_img)
                         self.post_process_predictions(labels)
-                        logger.info(f"Detected labels: {labels}")
+                        logger.info(f"Detected labels: {labels}, {confidences}")
                     else:
                         logger.info("No face detected")
                         play_audio("./assets/audios/look_straight.wav")
