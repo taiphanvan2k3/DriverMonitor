@@ -61,9 +61,17 @@ class DriverMonitorApp:
         self.sleepy_yawn_count = 0
         self.look_away_count = 0
         self.phone_count = 0
+        self.no_face_count = 0
         self.previous_statuses = ["natural"]
 
         self.using_phone = False
+
+        # Trạng thái không phát hiện khuôn mặt
+        self.start_no_face_time = None
+        self.last_no_face_audio_time = None  # Thời điểm cuối cùng phát âm thanh cảnh báo không có khuôn mặt
+        self.play_no_face_sound_step = 1.5  # giây
+        self.max_no_face_duration = 5  # tối đa 5s nếu không phát hiện khuôn mặt thì sẽ phát ra loa dừng xe
+        self.has_warned_stop = False
 
         # Trạng thái không nhìn thẳng
         self.start_look_away_time = None
@@ -128,6 +136,11 @@ class DriverMonitorApp:
             stat_frame, text="📱 Dùng điện thoại: 0", font=("Helvetica", 12), fg="orange", anchor="w"
         )
         self.phone_label.pack(fill="x", padx=20, pady=2)
+
+        self.no_face_label = tk.Label(
+            stat_frame, text="🔍 Không phát hiện khuôn mặt: 0", font=("Helvetica", 12), fg="orange", anchor="w"
+        )
+        self.no_face_label.pack(fill="x", padx=20, pady=2)
 
     def init_buttons(self):
         self.start_icon = ctk.CTkImage(Image.open("./assets/start.png").resize((24, 24)))
@@ -286,11 +299,27 @@ class DriverMonitorApp:
         self.set_status(status_text, status_color)
         self.update_error_counts(labels)
 
+    def refilter_classes(self):
+        final_classes = []
+        final_last_boxes = []
+        for x1, y1, x2, y2, conf, class_name in self.last_boxes:
+            if class_name == "natural":
+                continue
+
+            if class_name in ["phone"] and conf >= 0.65:
+                final_last_boxes.append((x1, y1, x2, y2, conf, class_name))
+                final_classes.append(class_name)
+            elif class_name in ["look_away", "rub_eye", "sleepy_eye", "yawn"] and conf >= 0.5:
+                final_last_boxes.append((x1, y1, x2, y2, conf, class_name))
+                final_classes.append(class_name)
+
+        return final_classes, final_last_boxes
+
     def run_predict(self):
         self.yolo_predict_thread = None
 
         with self.predict_lock:
-            results = self.yolo_classifier.predict(self.frame_for_predict, conf=0.25, verbose=False)
+            results = self.yolo_classifier.predict(self.frame_for_predict, conf=0.15, verbose=False)
             self.last_boxes = []
             result_classes = []
 
@@ -299,12 +328,79 @@ class DriverMonitorApp:
                 class_name = self.yolo_classifier.names[cls_id]
                 result_classes.append(class_name)
 
-                if class_name != "natural":
-                    x1, y1, x2, y2 = box.xyxy[0]
-                    conf = float(box.conf[0])
-                    self.last_boxes.append((x1, y1, x2, y2, conf, class_name))
+                if class_name == "natural":
+                    continue
+
+                x1, y1, x2, y2 = box.xyxy[0]
+                conf = float(box.conf[0])
+                self.last_boxes.append((x1, y1, x2, y2, conf, class_name))
 
             print(f"Detected classes: {result_classes}")
+
+            if not result_classes:
+                self.no_face_count += 1 if "no_face_detected" not in self.previous_statuses else 0
+                self.no_face_label.config(text=f"🔍 Không phát hiện khuôn mặt: {self.no_face_count}")
+
+                self.set_status("🔍 Không phát hiện khuôn mặt", "gray")
+                self.reset_warnings()
+
+                now = time.time()
+                no_face_duration = now - (self.start_no_face_time or now)
+
+                if self.start_no_face_time is None:
+                    self.start_no_face_time = now
+
+                if no_face_duration >= self.max_no_face_duration:
+                    if not self.has_warned_stop:
+                        self.has_warned_stop = True
+                        self.is_playing_stop_warning = True
+
+                        def play_stop_warning_then_reset():
+                            pygame.mixer.music.load("./assets/audios/stop_car_warning.wav")
+                            pygame.mixer.music.play()
+                            while pygame.mixer.music.get_busy():
+                                time.sleep(0.1)
+                            self.is_playing_stop_warning = False
+
+                        threading.Thread(target=play_stop_warning_then_reset, daemon=True).start()
+
+                    elif (
+                        not self.is_playing_warning and no_face_duration >= self.max_no_face_duration + 6
+                    ):  # đã cảnh báo stop rồi, giờ tiếp tục cảnh báo cấp độ 3
+                        self.is_playing_warning = True
+
+                        def play_warn_level3():
+                            play_audio("./assets/audios/warn_level3.wav")
+                            self.is_playing_warning = False
+
+                        threading.Thread(target=play_warn_level3, daemon=True).start()
+                    elif not self.is_playing_warning and no_face_duration >= self.max_no_face_duration + 3:
+                        self.is_playing_warning = True
+
+                        def play_warn_level1():
+                            play_audio("./assets/audios/warn_level1.wav")
+                            self.is_playing_warning = False
+
+                        threading.Thread(target=play_warn_level1, daemon=True).start()
+
+                elif (
+                    self.last_no_face_audio_time is None
+                    or now - self.last_no_face_audio_time >= self.play_no_face_sound_step
+                ):
+                    play_audio("./assets/audios/no_face_detected.wav")
+                    self.last_no_face_audio_time = now
+
+                self.previous_statuses = ["no_face_detected"]
+                return
+
+            self.start_no_face_time = None  # Reset khi có khuôn mặt
+            self.last_no_face_audio_time = None  # Reset khi có khuôn mặt
+            self.has_warned_stop = False
+            if "no_face_detected" in self.previous_statuses:
+                self.previous_statuses.remove("no_face_detected")
+            result_classes, result_last_boxes = self.refilter_classes()
+            self.last_boxes = result_last_boxes
+            print(f"Filtered classes: {result_classes}")
 
             if "phone" in result_classes:
                 self.using_phone = True
@@ -365,6 +461,7 @@ class DriverMonitorApp:
         if "look_away" in labels:
             self.look_away_count += 1 if "look_away" not in self.previous_statuses else 0
             self.look_label.config(text=f"👀 Nhìn hướng khác: {self.look_away_count}")
+        
         self.previous_statuses = ["natural"] if not labels else labels
 
     def run_send_telegram_alert(self, lasted_duration):
