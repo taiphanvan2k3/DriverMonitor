@@ -306,7 +306,7 @@ class DriverMonitorApp:
             if class_name == "natural":
                 continue
 
-            if class_name in ["phone"] and conf >= 0.65:
+            if class_name in ["phone"] and conf >= 0.6:
                 final_last_boxes.append((x1, y1, x2, y2, conf, class_name))
                 final_classes.append(class_name)
             elif class_name in ["look_away", "rub_eye", "sleepy_eye", "yawn"] and conf >= 0.5:
