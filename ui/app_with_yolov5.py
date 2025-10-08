@@ -7,7 +7,6 @@ import threading
 import pygame
 import time
 import mediapipe as mp
-from loguru import logger
 from telegram.telegram_helper import send_driver_drowsiness_alert_from_frame
 import torch
 import os, pathlib
@@ -15,11 +14,31 @@ import os, pathlib
 pygame.mixer.init()
 
 import warnings
+
 warnings.filterwarnings(
     "ignore",
     category=FutureWarning,
     message=r".*torch\.cuda\.amp\.autocast.*deprecated.*",
 )
+
+# Check xem đã có folder yolov5 chưa
+repo_dir = Path(__file__).parent / "yolov5"
+if not repo_dir.exists():
+    # Chạy lệnh git clone
+    import subprocess
+
+    print("========= Cloning YOLOv5 repository...")
+    subprocess.run(["git", "clone", "https://github.com/ultralytics/yolov5.git", str(repo_dir)], check=True)
+    print("========= YOLOv5 repository cloned. ==========")
+
+    # Cài đặt yêu cầu
+    print("========= Installing YOLOv5 dependencies...")
+    subprocess.run(
+        ["pip", "install", "-r", str(repo_dir / "requirements.txt")],
+        check=True,
+    )
+    print("========= YOLOv5 dependencies installed. ==========")
+
 
 def play_audio(file):
     def _play():
@@ -41,6 +60,7 @@ class _PosixPathPatcher:
         if os.name == "nt" and getattr(self, "_orig", None) is not None:
             pathlib.PosixPath = self._orig
 
+
 class DriverMonitorApp:
     def __init__(self, root):
         self.root = root
@@ -52,7 +72,7 @@ class DriverMonitorApp:
         self.init_ui()
         self.load_gif()
         self.load_model()
-    
+
     def _mp_has_face(self, frame_bgr):
         print("Checking face presence with MediaPipe...")
         # MediaPipe FaceDetection cần RGB
@@ -157,8 +177,8 @@ class DriverMonitorApp:
         self.is_playing_stop_warning = False  # Thông báo dừng xe có đang phát hay không
 
         self.mp_fd = mp.solutions.face_detection.FaceDetection(
-            model_selection=0,               # 0: gần (<=2m). Nếu cam xa hơn, thử 1
-            min_detection_confidence=0.2    # hạ ngưỡng một chút để tăng recall
+            model_selection=0,  # 0: gần (<=2m). Nếu cam xa hơn, thử 1
+            min_detection_confidence=0.2,  # hạ ngưỡng một chút để tăng recall
         )
 
     def init_ui(self):
@@ -466,8 +486,10 @@ class DriverMonitorApp:
                         self.look_label.config(text=f"👀 Nhìn hướng khác: {self.look_away_count}")
                         self.previous_statuses = ["look_away"]
                         now = time.time()
-                        if (self.start_look_away_time is None
-                            or now - self.start_look_away_time > self.play_look_away_sound_step):
+                        if (
+                            self.start_look_away_time is None
+                            or now - self.start_look_away_time > self.play_look_away_sound_step
+                        ):
                             self.start_look_away_time = now
                             if not self.is_playing_stop_warning:
                                 play_audio("./assets/audios/look_straight.wav")
