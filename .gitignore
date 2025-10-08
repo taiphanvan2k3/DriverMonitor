@@ -183,6 +183,6 @@ school_labs
 evaluations/**/*.jpg
 
 # Ignore all *.pt of Yolo
-**/*.pt
+# **/*.pt
 
 **/*.mp4
